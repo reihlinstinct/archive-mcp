@@ -4,7 +4,7 @@ import { strToU8 } from "fflate";
 import worker from "../src/index.js";
 import { writeArchive } from "../src/archive.js";
 
-function kv() { const m = new Map(); return { async put(k, v, o) { m.set(k, { v: v.buffer ? v.buffer.slice(v.byteOffset, v.byteOffset + v.byteLength) : v, meta: o?.metadata }); }, async get(k) { return m.get(k)?.v ?? null; }, async getWithMetadata(k) { const e = m.get(k); return { value: e?.v, metadata: e?.meta }; }, async list() { return { keys: [...m].map(([name, e]) => ({ name, metadata: e.meta })) }; } }; }
+function kv() { const m = new Map(); return { async put(k, v, o) { m.set(k, { v: v && v.buffer ? v.buffer.slice(v.byteOffset, v.byteOffset + v.byteLength) : v, meta: o?.metadata }); }, async delete(k) { m.delete(k); }, async get(k) { return m.get(k)?.v ?? null; }, async getWithMetadata(k) { const e = m.get(k); return { value: e?.v, metadata: e?.meta }; }, async list() { return { keys: [...m].map(([name, e]) => ({ name, metadata: e.meta })) }; } }; }
 const env = () => ({ AUTH_TOKEN: "tok", ENC_SECRET: "enc", ARCHIVES: kv() });
 const call = (e, path, init = {}) => worker.fetch(new Request("https://w.test" + path, init), e);
 const auth = { authorization: "Bearer tok" };
@@ -23,3 +23,63 @@ test("upload, mcp read, create, download", async () => {
   assert.equal((await call(e, m[1].replace("https://w.test", "").replace(/sig=\w+/, "sig=bad"))).status, 403);
 });
 test("upload rejects non-archives", async () => { assert.equal((await call(env(), "/upload", { method: "POST", headers: auth, body: "plain text" })).status, 400); });
+
+// OAuth authorization-code + PKCE flow (Gemini web connector path)
+const oauthEnv = () => ({ ...env(), OAUTH_CLIENT_ID: "cid", OAUTH_CLIENT_SECRET: "csecret", OAUTH_REDIRECT_URIS: "https://gemini.google.com/callback/mcp" });
+const pkce = async (verifier) => {
+  const d = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier));
+  return btoa(String.fromCharCode(...new Uint8Array(d))).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+};
+
+test("oauth discovery metadata", async () => {
+  const e = oauthEnv();
+  const as = await call(e, "/.well-known/oauth-authorization-server").then((r) => r.json());
+  assert.equal(as.authorization_endpoint, "https://w.test/authorize");
+  assert.deepEqual(as.code_challenge_methods_supported, ["S256"]);
+  const pr = await call(e, "/.well-known/oauth-protected-resource").then((r) => r.json());
+  assert.equal(pr.resource, "https://w.test");
+});
+
+test("oauth flow: authorize, exchange, use token; replay and bad inputs rejected", async () => {
+  const e = oauthEnv();
+  const verifier = "v-" + "x".repeat(43);
+  const challenge = await pkce(verifier);
+  const qs = `response_type=code&client_id=cid&redirect_uri=${encodeURIComponent("https://gemini.google.com/callback/mcp")}&state=st&code_challenge=${challenge}&code_challenge_method=S256`;
+  const auth = await call(e, "/authorize?" + qs);
+  assert.equal(auth.status, 302);
+  const loc = new URL(auth.headers.get("location"));
+  assert.equal(loc.searchParams.get("state"), "st");
+  const code = loc.searchParams.get("code");
+  assert.ok(code);
+  const exchange = (body) => call(e, "/token", { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body });
+  // wrong verifier
+  const bad = await exchange(`grant_type=authorization_code&client_id=cid&client_secret=csecret&code=${code}&redirect_uri=${encodeURIComponent("https://gemini.google.com/callback/mcp")}&code_verifier=wrong`);
+  assert.equal(bad.status, 400);
+  // code is single-use even after failure
+  const replay = await exchange(`grant_type=authorization_code&client_id=cid&client_secret=csecret&code=${code}&redirect_uri=${encodeURIComponent("https://gemini.google.com/callback/mcp")}&code_verifier=${verifier}`);
+  assert.equal(replay.status, 400);
+  // fresh code, wrong client secret
+  const auth2 = await call(e, "/authorize?" + qs);
+  const code2 = new URL(auth2.headers.get("location")).searchParams.get("code");
+  const badSecret = await exchange(`grant_type=authorization_code&client_id=cid&client_secret=nope&code=${code2}&redirect_uri=${encodeURIComponent("https://gemini.google.com/callback/mcp")}&code_verifier=${verifier}`);
+  assert.equal(badSecret.status, 401);
+  // fresh code, full exchange
+  const auth3 = await call(e, "/authorize?" + qs);
+  const code3 = new URL(auth3.headers.get("location")).searchParams.get("code");
+  const good = await exchange(`grant_type=authorization_code&client_id=cid&client_secret=csecret&code=${code3}&redirect_uri=${encodeURIComponent("https://gemini.google.com/callback/mcp")}&code_verifier=${verifier}`);
+  assert.equal(good.status, 200);
+  const { access_token, token_type } = await good.json();
+  assert.equal(token_type, "Bearer");
+  const mcp = await call(e, "/mcp", { method: "POST", headers: { authorization: "Bearer " + access_token }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }) });
+  assert.equal(mcp.status, 200);
+  // tampered token rejected
+  const tampered = await call(e, "/mcp", { method: "POST", headers: { authorization: "Bearer " + access_token.slice(0, -2) + "zz" }, body: "{}" });
+  assert.equal(tampered.status, 401);
+});
+
+test("authorize rejects unknown redirect_uri and client", async () => {
+  const e = oauthEnv();
+  const base = "response_type=code&code_challenge=ch&code_challenge_method=S256";
+  assert.equal((await call(e, `/authorize?${base}&client_id=cid&redirect_uri=${encodeURIComponent("https://evil.example/cb")}`)).status, 400);
+  assert.equal((await call(e, `/authorize?${base}&client_id=nobody&redirect_uri=${encodeURIComponent("https://gemini.google.com/callback/mcp")}`)).status, 400);
+});

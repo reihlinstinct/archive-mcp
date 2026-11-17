@@ -16,7 +16,7 @@ Archives are encrypted at rest (AES-GCM), kept 24 hours in Workers KV, then dele
 ## Connect
 
 - Gemini CLI: `gemini mcp add --transport http -s user archive https://<worker>/mcp --header "Authorization: Bearer <token>"`
-- Gemini web app custom apps: availability depends on the account (personal, 18+, US, English per Google) and may require OAuth, which this server does not provide yet.
+- Gemini web app custom connector: add an MCP server at `https://<worker>/mcp` with the OAuth client ID and client secret the operator gave you. The Worker speaks authorization-code + PKCE and serves discovery metadata at `/.well-known/oauth-authorization-server` and `/.well-known/oauth-protected-resource`. The connector's redirect URI must be in the Worker's allowlist (Worker secret `OAUTH_REDIRECT_URIS`).
 
 ## Deploy
 

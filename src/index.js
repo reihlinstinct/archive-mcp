@@ -1,6 +1,7 @@
 import { handleRpc } from "./mcp.js";
 import { detectFormat, readArchive, LIMITS } from "./archive.js";
 import { encrypt, decrypt, sign, safeEqual } from "./crypto.js";
+import { authorizationServerMetadata, protectedResourceMetadata, handleAuthorize, handleToken, oauthTokenValid } from "./oauth.js";
 
 const TTL = 24 * 3600;
 
@@ -33,10 +34,11 @@ export function makeStore(env, origin) {
   };
 }
 
-function authed(req, env) {
+async function authed(req, env) {
   const h = req.headers.get("authorization") || "";
   const t = h.startsWith("Bearer ") ? h.slice(7) : new URL(req.url).searchParams.get("token") || "";
-  return !!env.AUTH_TOKEN && safeEqual(t, env.AUTH_TOKEN);
+  if (!!env.AUTH_TOKEN && safeEqual(t, env.AUTH_TOKEN)) return true;
+  return oauthTokenValid(env, t);
 }
 
 const PAGE = `<!doctype html><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><title>Archive upload</title>
@@ -54,6 +56,10 @@ export default {
     const store = makeStore(env, url.origin);
     if (url.pathname === "/" && req.method === "GET") return new Response(PAGE, { headers: { "content-type": "text/html; charset=utf-8", "content-security-policy": "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; base-uri 'none'; form-action 'none'", "x-content-type-options": "nosniff", "referrer-policy": "no-referrer" } });
     if (url.pathname === "/.well-known/security.txt") return new Response("Contact: https://github.com/reihlinstinct/archive-mcp/security/advisories/new\nExpires: 2027-11-17T00:00:00Z\n");
+    if (url.pathname === "/.well-known/oauth-authorization-server") return Response.json(authorizationServerMetadata(url.origin));
+    if (url.pathname === "/.well-known/oauth-protected-resource") return Response.json(protectedResourceMetadata(url.origin));
+    if (url.pathname === "/authorize" && req.method === "GET") return handleAuthorize(url, env);
+    if (url.pathname === "/token" && req.method === "POST") return handleToken(req, env);
     if (url.pathname.startsWith("/download/") && req.method === "GET") {
       const id = url.pathname.slice(10), exp = url.searchParams.get("exp") || "", sig = url.searchParams.get("sig") || "";
       if (!/^[a-f0-9]{16}$/.test(id) || +exp < Date.now() / 1000 || !safeEqual(sig, await sign(env.ENC_SECRET, id + ":" + exp))) return new Response("forbidden", { status: 403 });
@@ -63,7 +69,7 @@ export default {
         return new Response(bytes, { headers: { "content-type": "application/octet-stream", "content-disposition": `attachment; filename="${(m.name || "archive").replace(/[^\w.-]/g, "_")}"`, "cache-control": "no-store" } });
       } catch { return new Response("not found", { status: 404 }); }
     }
-    if (!authed(req, env)) return new Response("unauthorized", { status: 401, headers: { "www-authenticate": "Bearer" } });
+    if (!(await authed(req, env))) return new Response("unauthorized", { status: 401, headers: { "www-authenticate": `Bearer resource_metadata="${url.origin}/.well-known/oauth-protected-resource"` } });
     if (url.pathname === "/upload" && req.method === "POST") {
       const bytes = new Uint8Array(await req.arrayBuffer());
       if (!bytes.length || bytes.length > LIMITS.maxArchiveBytes) return new Response("size must be 1 byte to 20 MB", { status: 413 });
