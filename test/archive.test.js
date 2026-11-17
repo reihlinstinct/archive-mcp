@@ -29,7 +29,7 @@ test("tools: list, read, search, create with base", async () => {
 test("tool errors are reported not thrown", async () => { assert.equal((await callTool("read_file", { id: "zzz", path: "a" }, mem())).isError, true); });
 test("rpc: initialize, list, notification, unknown", async () => {
   const s = mem();
-  assert.equal((await handleRpc({ jsonrpc: "2.0", id: 1, method: "tools/list" }, s)).result.tools.length, 7);
+  assert.equal((await handleRpc({ jsonrpc: "2.0", id: 1, method: "tools/list" }, s)).result.tools.length, 8);
   assert.equal(await handleRpc({ jsonrpc: "2.0", method: "notifications/initialized" }, s), null);
   assert.equal((await handleRpc({ jsonrpc: "2.0", id: 2, method: "nope" }, s)).error.code, -32601);
 });
@@ -96,4 +96,13 @@ test("normalizeUrl rewrites Drive and Dropbox share links", async () => {
   assert.equal(normalizeUrl("https://drive.google.com/file/d/AbC-123_x/view?usp=sharing").toString(), "https://drive.usercontent.google.com/download?id=AbC-123_x&export=download&confirm=t");
   assert.equal(normalizeUrl("https://www.dropbox.com/s/abc123/pack.zip?dl=0").searchParams.get("dl"), "1");
   assert.throws(() => normalizeUrl("https://drive.google.com/drive/folders/xyz"));
+});
+
+test("debug_echo_context reports argument structure and client meta", async () => {
+  const s = mem();
+  const r = await callTool("debug_echo_context", { file: { uri: "https://x/f.tar.gz" }, big: "z".repeat(1000), n: 3 }, s, undefined, { session: "abc" });
+  const t = r.content[0].text;
+  assert.match(t, /"length": 1000/);
+  assert.match(t, /https:\/\/x\/f\.tar\.gz/);
+  assert.match(t, /"session"/);
 });

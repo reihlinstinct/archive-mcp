@@ -39,6 +39,10 @@ export function makeStore(env, origin) {
     },
     // One-time upload links: the /u/<token> URL is the credential, so random
     // 144-bit tokens, 15-minute TTL, consumed on first upload.
+    async putDebug(entry) {
+      const t = Date.now().toString(36) + b64u(crypto.getRandomValues(new Uint8Array(4)));
+      await env.ARCHIVES.put("d:" + t, entry, { expirationTtl: 3600 });
+    },
     async putUploadToken() {
       const t = b64u(crypto.getRandomValues(new Uint8Array(18)));
       await env.ARCHIVES.put("u:" + t, "1", { expirationTtl: UPLOAD_LINK_TTL });
