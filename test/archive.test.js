@@ -33,3 +33,18 @@ test("rpc: initialize, list, notification, unknown", async () => {
   assert.equal(await handleRpc({ jsonrpc: "2.0", method: "notifications/initialized" }, s), null);
   assert.equal((await handleRpc({ jsonrpc: "2.0", id: 2, method: "nope" }, s)).error.code, -32601);
 });
+test("safePath strips trailing slashes (no regex)", () => {
+  assert.equal(safePath("a/b/"), "a/b");
+  assert.equal(safePath("a//"), "a");
+});
+test("tar header has fixed zero mtime", () => {
+  const tar = buildTar({ "f.txt": strToU8("x") });
+  assert.deepEqual([...tar.subarray(136, 147)], Array(11).fill(48)); // 11x ASCII "0"
+  assert.equal(tar[147], 0);
+});
+test("safePath normalizes long repeated ./ input fast and without regex", () => {
+  const p = "./".repeat(10000) + "a/b.txt";
+  const t0 = Date.now();
+  assert.equal(safePath(p), "a/b.txt");
+  assert.ok(Date.now() - t0 < 1000, "normalization must stay linear");
+});
