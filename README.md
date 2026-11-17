@@ -28,6 +28,18 @@ Needs a Cloudflare account (free) and these repo secrets: `CLOUDFLARE_API_TOKEN`
 
 `npm ci && npm test`. Limits: 20 MB archive, 100 MB unpacked, 5000 files, 32 KB per read.
 
+## Live functional tests
+
+`test/e2e.live.js` runs 41 end-to-end checks against a deployed instance: auth and the full OAuth flow, tar.gz/ZIP upload and read, one-time upload links, create + download round trips, size and malformed-input limits (zip-slip, truncated, oversize), link imports, and the debug echo. It is not part of CI because it needs a live Worker and its secrets. Deploy a throwaway instance with its own secrets (`npx wrangler deploy --name archive-mcp-test` plus `wrangler secret put` for `AUTH_TOKEN`, `ENC_SECRET`, `OAUTH_CLIENT_ID`, `OAUTH_CLIENT_SECRET`, `OAUTH_REDIRECT_URIS`), then:
+
+```sh
+BASE=https://archive-mcp-test.<subdomain>.workers.dev AUTH_TOKEN=... \
+OAUTH_CLIENT_ID=... OAUTH_CLIENT_SECRET=... REDIRECT_URI=https://example.invalid/cb \
+node test/e2e.live.js
+```
+
+Delete the throwaway Worker and its KV namespace afterwards. One behavior to know: Workers KV `list()` is eventually consistent, so a fresh upload can take up to about a minute to appear in `list_archives` (the suite polls for it).
+
 ## Security
 
 See [SECURITY.md](SECURITY.md). Reports go through GitHub private vulnerability reporting; the Worker also serves `/.well-known/security.txt`.
