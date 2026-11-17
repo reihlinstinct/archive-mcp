@@ -1,0 +1,85 @@
+import { handleRpc } from "./mcp.js";
+import { detectFormat, readArchive, LIMITS } from "./archive.js";
+import { encrypt, decrypt, sign, safeEqual } from "./crypto.js";
+
+const TTL = 24 * 3600;
+
+export function makeStore(env, origin) {
+  const k = env.ENC_SECRET;
+  return {
+    async put(bytes, name, format) {
+      const id = crypto.randomUUID().replace(/-/g, "").slice(0, 16);
+      await env.ARCHIVES.put("a:" + id, await encrypt(k, bytes), { expirationTtl: TTL, metadata: { name, format, size: bytes.length } });
+      return id;
+    },
+    async get(id) {
+      if (!/^[a-f0-9]{16}$/.test(id || "")) throw new Error("bad archive id");
+      const blob = await env.ARCHIVES.get("a:" + id, "arrayBuffer");
+      if (!blob) throw new Error("archive not found or expired");
+      return decrypt(k, blob);
+    },
+    async list() {
+      const r = await env.ARCHIVES.list({ prefix: "a:" });
+      return r.keys.map((x) => ({ id: x.name.slice(2), ...(x.metadata || {}) }));
+    },
+    async meta(id) {
+      const r = await env.ARCHIVES.getWithMetadata("a:" + id, "arrayBuffer");
+      return r.metadata;
+    },
+    async downloadUrl(id) {
+      const exp = Math.floor(Date.now() / 1000) + 3600;
+      return `${origin}/download/${id}?exp=${exp}&sig=${await sign(k, id + ":" + exp)}`;
+    },
+  };
+}
+
+function authed(req, env) {
+  const h = req.headers.get("authorization") || "";
+  const t = h.startsWith("Bearer ") ? h.slice(7) : new URL(req.url).searchParams.get("token") || "";
+  return !!env.AUTH_TOKEN && safeEqual(t, env.AUTH_TOKEN);
+}
+
+const PAGE = `<!doctype html><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><title>Archive upload</title>
+<body style="font-family:system-ui;max-width:32rem;margin:2rem auto;padding:0 1rem"><h1>Archive upload</h1>
+<p>ZIP or tar.gz, up to 20 MB. Stored encrypted for 24 hours. Do not upload personal or family data.</p>
+<input id=t type=password placeholder="access token" style="width:100%;margin:.3rem 0"><input id=f type=file accept=".zip,.tar.gz,.tgz" style="margin:.3rem 0"><br>
+<button id=b>Upload</button><pre id=o></pre>
+<script>b.onclick=async()=>{const file=f.files[0];if(!file)return;o.textContent="Uploading...";
+const r=await fetch("/upload?name="+encodeURIComponent(file.name),{method:"POST",headers:{authorization:"Bearer "+t.value},body:file});
+o.textContent=r.ok?"Archive id: "+(await r.json()).id:"Failed: "+r.status+" "+await r.text()}</script>`;
+
+export default {
+  async fetch(req, env) {
+    const url = new URL(req.url);
+    const store = makeStore(env, url.origin);
+    if (url.pathname === "/" && req.method === "GET") return new Response(PAGE, { headers: { "content-type": "text/html; charset=utf-8", "content-security-policy": "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; base-uri 'none'; form-action 'none'", "x-content-type-options": "nosniff", "referrer-policy": "no-referrer" } });
+    if (url.pathname === "/.well-known/security.txt") return new Response("Contact: https://github.com/reihlinstinct/archive-mcp/security/advisories/new\nExpires: 2027-11-17T00:00:00Z\n");
+    if (url.pathname.startsWith("/download/") && req.method === "GET") {
+      const id = url.pathname.slice(10), exp = url.searchParams.get("exp") || "", sig = url.searchParams.get("sig") || "";
+      if (!/^[a-f0-9]{16}$/.test(id) || +exp < Date.now() / 1000 || !safeEqual(sig, await sign(env.ENC_SECRET, id + ":" + exp))) return new Response("forbidden", { status: 403 });
+      try {
+        const bytes = await store.get(id);
+        const m = (await store.meta(id)) || {};
+        return new Response(bytes, { headers: { "content-type": "application/octet-stream", "content-disposition": `attachment; filename="${(m.name || "archive").replace(/[^\w.-]/g, "_")}"`, "cache-control": "no-store" } });
+      } catch { return new Response("not found", { status: 404 }); }
+    }
+    if (!authed(req, env)) return new Response("unauthorized", { status: 401, headers: { "www-authenticate": "Bearer" } });
+    if (url.pathname === "/upload" && req.method === "POST") {
+      const bytes = new Uint8Array(await req.arrayBuffer());
+      if (!bytes.length || bytes.length > LIMITS.maxArchiveBytes) return new Response("size must be 1 byte to 20 MB", { status: 413 });
+      try { const f = detectFormat(bytes); readArchive(bytes); const name = (url.searchParams.get("name") || "upload").replace(/[^\w.-]/g, "_").slice(0, 80); const id = await store.put(bytes, name, f); return Response.json({ id }); }
+      catch (e) { return new Response("invalid archive: " + e.message, { status: 400 }); }
+    }
+    if (url.pathname === "/mcp") {
+      if (req.method === "GET") return new Response("use POST", { status: 405, headers: { allow: "POST" } });
+      if (req.method !== "POST") return new Response("method not allowed", { status: 405 });
+      let body;
+      try { body = await req.json(); } catch { return Response.json({ jsonrpc: "2.0", id: null, error: { code: -32700, message: "parse error" } }, { status: 400 }); }
+      const batch = Array.isArray(body);
+      const out = (await Promise.all((batch ? body : [body]).map((m) => handleRpc(m, store)))).filter(Boolean);
+      if (!out.length) return new Response(null, { status: 202 });
+      return Response.json(batch ? out : out[0]);
+    }
+    return new Response("not found", { status: 404 });
+  },
+};
