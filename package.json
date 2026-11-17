@@ -1,0 +1,20 @@
+{
+  "name": "archive-mcp",
+  "version": "0.1.0",
+  "description": "Remote MCP server that lets an AI client read and create ZIP and tar.gz archives it cannot receive as uploads",
+  "type": "module",
+  "main": "src/index.js",
+  "scripts": {
+    "test": "node --test test/*.test.js",
+    "deploy": "wrangler deploy"
+  },
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "fflate": "^0.8.3"
+  },
+  "private": true,
+  "devDependencies": {
+    "wrangler": "^4"
+  }
+}

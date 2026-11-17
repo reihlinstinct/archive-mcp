@@ -1,0 +1,72 @@
+name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+permissions:
+  contents: read
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+jobs:
+  changes:
+    runs-on: ubuntu-24.04
+    outputs:
+      code: ${{ steps.filter.outputs.code }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - id: filter
+        shell: bash
+        env:
+          BASE_REF: ${{ github.base_ref }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          # Docs-only pull requests skip the test job; the Run summary job
+          # still runs and reports it as skipped.
+          if [ "$EVENT_NAME" != "pull_request" ]; then
+            echo "code=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # --no-renames: a code-to-doc rename still shows the deleted code
+          # path, so it cannot masquerade as docs-only.
+          git diff --no-renames --name-only "origin/${BASE_REF}...HEAD" | tee /tmp/changed.txt
+          # Doc-only allowlist: markdown, license, and exact community
+          # metadata names (no prefix matches) - unknown files run the suite.
+          if grep -qvEi '\.(md|markdown|rst)$|^LICENSE$|^\.github/(CODEOWNERS|dependabot\.yml|FUNDING\.yml)$|^\.github/ISSUE_TEMPLATE/[^/]+\.(md|yml|yaml)$|^\.github/PULL_REQUEST_TEMPLATE(\.md)?$' /tmp/changed.txt; then
+            echo "code=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "code=false" >> "$GITHUB_OUTPUT"
+          fi
+  test:
+    needs: [changes]
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm test
+  summary:
+    permissions:
+      contents: read
+    name: Run summary
+    if: always()
+    needs: [changes, test]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Write run summary
+        env:
+          NEEDS_JSON: ${{ toJSON(needs) }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python3 scripts/ci/run_summary.py

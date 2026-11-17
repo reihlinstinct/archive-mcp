@@ -1,0 +1,36 @@
+{
+  "mappings": [
+    {
+      "pattern": "src/**",
+      "checks": [
+        "test"
+      ]
+    },
+    {
+      "pattern": "test/**",
+      "checks": [
+        "test"
+      ]
+    },
+    {
+      "pattern": "wrangler.toml",
+      "checks": [
+        "deploy"
+      ]
+    },
+    {
+      "pattern": "package.json",
+      "checks": [
+        "test",
+        "review"
+      ]
+    },
+    {
+      "pattern": "package-lock.json",
+      "checks": [
+        "test",
+        "review"
+      ]
+    }
+  ]
+}
