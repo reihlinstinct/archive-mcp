@@ -7,9 +7,11 @@ A remote MCP server (Cloudflare Worker, free tier) that lets an AI client read Z
 
 ## How it works
 
-1. Open the Worker's root page, enter your access token, upload an archive (max 20 MB). You get an archive id.
-2. Connect your AI client to `https://<worker>/mcp` with `Authorization: Bearer <token>`.
-3. The client calls tools: `list_archives`, `list_files`, `read_file`, `search`, `create_archive` (new, or based on an uploaded archive with changes and deletions). `create_archive` returns a download link valid for one hour.
+Chat attachments never reach an MCP server, so archives get onto this server first, then the client works with them by id:
+
+1. **From a public link**: give the client a Google Drive "anyone with the link" share link, a Dropbox share link, or a direct download link on GitHub/GitLab. It calls `import_archive`, and the Worker fetches the file server-side (https only, host allowlist, max 20 MB).
+2. **From your device**: ask the client for an upload link - it calls `request_upload_link` and hands you a one-time link (15 minutes, no access token). Or open the Worker's root page and upload with your access token.
+3. The client then works with the archive by id: `list_archives`, `list_files`, `read_file` (32 KB per call, paged), `search`, `create_archive` (new, or based on an uploaded archive with changes and deletions). `create_archive` returns a download link valid for one hour.
 
 Archives are encrypted at rest (AES-GCM), kept 24 hours in Workers KV, then deleted. **Do not upload personal or family data**: KV replicates globally and the region can't be pinned.
 
@@ -24,7 +26,7 @@ Needs a Cloudflare account (free) and these repo secrets: `CLOUDFLARE_API_TOKEN`
 
 ## Develop
 
-`npm ci && npm test`. Limits: 20 MB archive, 100 MB unpacked, 5000 files, 256 KB per read.
+`npm ci && npm test`. Limits: 20 MB archive, 100 MB unpacked, 5000 files, 32 KB per read.
 
 ## Security
 
