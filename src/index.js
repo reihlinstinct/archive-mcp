@@ -8,6 +8,7 @@ const TTL = 24 * 3600;
 export function makeStore(env, origin) {
   const k = env.ENC_SECRET;
   return {
+    origin,
     async put(bytes, name, format) {
       const id = crypto.randomUUID().replace(/-/g, "").slice(0, 16);
       await env.ARCHIVES.put("a:" + id, await encrypt(k, bytes), { expirationTtl: TTL, metadata: { name, format, size: bytes.length } });

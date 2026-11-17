@@ -33,6 +33,20 @@ test("rpc: initialize, list, notification, unknown", async () => {
   assert.equal(await handleRpc({ jsonrpc: "2.0", method: "notifications/initialized" }, s), null);
   assert.equal((await handleRpc({ jsonrpc: "2.0", id: 2, method: "nope" }, s)).error.code, -32601);
 });
+test("initialize instructions and tool descriptions route the model to upload-first", async () => {
+  const s = mem();
+  const init = await handleRpc({ jsonrpc: "2.0", id: 1, method: "initialize", params: {} }, s);
+  assert.match(init.result.instructions, /never forwarded to this server/);
+  assert.match(init.result.instructions, /archive id/);
+  const { tools } = (await handleRpc({ jsonrpc: "2.0", id: 2, method: "tools/list" }, s)).result;
+  assert.match(tools.find((t) => t.name === "list_archives").description, /NOT visible here/);
+  assert.match(tools.find((t) => t.name === "list_files").description, /archive id/);
+});
+test("serverInstructions embeds the upload page URL when origin is known", async () => {
+  const { serverInstructions } = await import("../src/mcp.js");
+  assert.match(serverInstructions({ origin: "https://x.example" }), /https:\/\/x\.example\//);
+  assert.match(serverInstructions({}), /upload page/);
+});
 test("safePath strips trailing slashes (no regex)", () => {
   assert.equal(safePath("a/b/"), "a/b");
   assert.equal(safePath("a//"), "a");

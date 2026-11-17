@@ -2,14 +2,26 @@
 import { readArchive, writeArchive, isText, strToU8, strFromU8, safePath, LIMITS } from "./archive.js";
 
 export const TOOLS = [
-  { name: "list_archives", description: "List archives the user uploaded (id, name, format, size). They expire after 24 hours.", inputSchema: { type: "object", properties: {} } },
-  { name: "list_files", description: "List files inside an archive with sizes.", inputSchema: { type: "object", properties: { id: { type: "string" }, prefix: { type: "string" } }, required: ["id"] } },
-  { name: "read_file", description: "Read one text file from an archive. Use offset/length (bytes) for large files.", inputSchema: { type: "object", properties: { id: { type: "string" }, path: { type: "string" }, offset: { type: "integer" }, length: { type: "integer" } }, required: ["id", "path"] } },
-  { name: "search", description: "Case-insensitive substring search across text files in an archive. Returns path:line matches.", inputSchema: { type: "object", properties: { id: { type: "string" }, query: { type: "string" }, max_results: { type: "integer" } }, required: ["id", "query"] } },
+  { name: "list_archives", description: "List archives the user uploaded to this server (id, name, format, size). Archives expire after 24 hours. Files attached in the chat are NOT visible here: if the user attached an archive in chat, ask them to upload it once at the upload page and give you the archive id shown after upload.", inputSchema: { type: "object", properties: {} } },
+  { name: "list_files", description: "List files inside an uploaded archive with sizes. Needs an archive id: call list_archives, or ask the user to upload their archive at the upload page and send you the id. Chat attachments are not accessible to this server.", inputSchema: { type: "object", properties: { id: { type: "string" }, prefix: { type: "string" } }, required: ["id"] } },
+  { name: "read_file", description: "Read one text file from an uploaded archive. Use offset/length (bytes) for large files. Needs an archive id (see list_archives).", inputSchema: { type: "object", properties: { id: { type: "string" }, path: { type: "string" }, offset: { type: "integer" }, length: { type: "integer" } }, required: ["id", "path"] } },
+  { name: "search", description: "Case-insensitive substring search across text files in an uploaded archive. Returns path:line matches. Needs an archive id (see list_archives).", inputSchema: { type: "object", properties: { id: { type: "string" }, query: { type: "string" }, max_results: { type: "integer" } }, required: ["id", "query"] } },
   { name: "create_archive", description: "Create a ZIP or tar.gz from files (path + text content). With base_id, start from that archive: files overwrite or add, delete_paths removes. Returns an id and a short-lived download URL.", inputSchema: { type: "object", properties: { format: { type: "string", enum: ["zip", "tar.gz"] }, name: { type: "string" }, base_id: { type: "string" }, files: { type: "array", items: { type: "object", properties: { path: { type: "string" }, content: { type: "string" } }, required: ["path", "content"] } }, delete_paths: { type: "array", items: { type: "string" } } }, required: ["format", "name"] } },
 ];
 
 const text = (t) => ({ content: [{ type: "text", text: t }] });
+
+// Model-facing guidance (MCP initialize instructions): chat attachments never
+// reach this server, so the model must route the user through the upload page
+// first instead of trying to read the attachment itself.
+export function serverInstructions(store) {
+  const page = store && store.origin ? store.origin + "/" : "the server's upload page";
+  return "Archive-mcp reads and creates ZIP and tar.gz archives that the user has uploaded to this server. " +
+    "Files attached in this chat are never forwarded to this server. If the user refers to an attached or local archive, " +
+    "do not try to read the attachment yourself: ask the user to upload it once at " + page + " (with their access token) " +
+    "and send you the archive id shown after upload. Then use list_files, read_file and search with that id. " +
+    "Call list_archives to see what is already uploaded. Archives expire 24 hours after upload.";
+}
 const fail = (t) => ({ content: [{ type: "text", text: t }], isError: true });
 
 export async function callTool(name, args, store) {
@@ -74,7 +86,7 @@ export async function handleRpc(msg, store) {
   if (id === undefined) return null; // notification
   switch (method) {
     case "initialize":
-      return ok({ protocolVersion: params?.protocolVersion || "2025-03-26", capabilities: { tools: {} }, serverInfo: { name: "archive-mcp", version: "0.1.0" } });
+      return ok({ protocolVersion: params?.protocolVersion || "2025-03-26", capabilities: { tools: {} }, serverInfo: { name: "archive-mcp", version: "0.1.0" }, instructions: serverInstructions(store) });
     case "ping": return ok({});
     case "tools/list": return ok({ tools: TOOLS });
     case "tools/call": return ok(await callTool(params?.name, params?.arguments || {}, store));
