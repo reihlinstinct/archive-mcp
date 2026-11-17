@@ -4,10 +4,16 @@ import { encrypt, decrypt, sign, safeEqual } from "./crypto.js";
 import { authorizationServerMetadata, protectedResourceMetadata, handleAuthorize, handleToken, oauthTokenValid } from "./oauth.js";
 
 const TTL = 24 * 3600;
+const UPLOAD_LINK_TTL = 900; // one-time /u/ links: 15 minutes
+
+const b64u = (bytes) =>
+  btoa(String.fromCharCode(...new Uint8Array(bytes)))
+    .replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 
 export function makeStore(env, origin) {
   const k = env.ENC_SECRET;
   return {
+    origin,
     async put(bytes, name, format) {
       const id = crypto.randomUUID().replace(/-/g, "").slice(0, 16);
       await env.ARCHIVES.put("a:" + id, await encrypt(k, bytes), { expirationTtl: TTL, metadata: { name, format, size: bytes.length } });
@@ -31,7 +37,39 @@ export function makeStore(env, origin) {
       const exp = Math.floor(Date.now() / 1000) + 3600;
       return `${origin}/download/${id}?exp=${exp}&sig=${await sign(k, id + ":" + exp)}`;
     },
+    // One-time upload links: the /u/<token> URL is the credential, so random
+    // 144-bit tokens, 15-minute TTL, consumed on first upload.
+    async putDebug(entry) {
+      const t = Date.now().toString(36) + b64u(crypto.getRandomValues(new Uint8Array(4)));
+      await env.ARCHIVES.put("d:" + t, entry, { expirationTtl: 3600 });
+    },
+    async putUploadToken() {
+      const t = b64u(crypto.getRandomValues(new Uint8Array(18)));
+      await env.ARCHIVES.put("u:" + t, "1", { expirationTtl: UPLOAD_LINK_TTL });
+      return t;
+    },
+    async peekUploadToken(t) {
+      return /^[\w-]{20,30}$/.test(t || "") && (await env.ARCHIVES.get("u:" + t)) !== null;
+    },
+    async takeUploadToken(t) {
+      if (!/^[\w-]{20,30}$/.test(t || "")) return false;
+      const v = await env.ARCHIVES.get("u:" + t);
+      if (v !== null) await env.ARCHIVES.delete("u:" + t);
+      return v !== null;
+    },
   };
+}
+
+// Shared body validation for /upload (bearer token) and /u/<token> (one-time link).
+async function acceptArchive(req, url, store) {
+  const bytes = new Uint8Array(await req.arrayBuffer());
+  if (!bytes.length || bytes.length > LIMITS.maxArchiveBytes) return new Response("size must be 1 byte to 20 MB", { status: 413 });
+  try {
+    const f = detectFormat(bytes); readArchive(bytes);
+    const name = (url.searchParams.get("name") || "upload").replace(/[^\w.-]/g, "_").slice(0, 80);
+    const id = await store.put(bytes, name, f);
+    return Response.json({ id });
+  } catch (e) { return new Response("invalid archive: " + e.message, { status: 400 }); }
 }
 
 async function authed(req, env) {
@@ -49,6 +87,15 @@ const PAGE = `<!doctype html><meta charset=utf-8><meta name=viewport content="wi
 <script>b.onclick=async()=>{const file=f.files[0];if(!file)return;o.textContent="Uploading...";
 const r=await fetch("/upload?name="+encodeURIComponent(file.name),{method:"POST",headers:{authorization:"Bearer "+t.value},body:file});
 o.textContent=r.ok?"Archive id: "+(await r.json()).id:"Failed: "+r.status+" "+await r.text()}</script>`;
+
+const UPAGE = (tok) => `<!doctype html><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><title>Archive upload</title>
+<body style="font-family:system-ui;max-width:32rem;margin:2rem auto;padding:0 1rem"><h1>Archive upload</h1>
+<p>One-time link: ZIP or tar.gz, up to 20 MB. Stored encrypted for 24 hours. Do not upload personal or family data.</p>
+<input id=f type=file accept=".zip,.tar.gz,.tgz"><br><br>
+<button id=b>Upload</button><pre id=o></pre>
+<script>b.onclick=async()=>{const file=f.files[0];if(!file)return;o.textContent="Uploading...";
+const r=await fetch("/u/${tok}",{method:"POST",body:file});
+o.textContent=r.ok?"Done. Archive id: "+(await r.json()).id+" - go back to your chat and say it is uploaded; the assistant can list it.":"Failed: "+r.status+" "+await r.text()}</script>`;
 
 export default {
   async fetch(req, env) {
@@ -69,13 +116,20 @@ export default {
         return new Response(bytes, { headers: { "content-type": "application/octet-stream", "content-disposition": `attachment; filename="${(m.name || "archive").replace(/[^\w.-]/g, "_")}"`, "cache-control": "no-store" } });
       } catch { return new Response("not found", { status: 404 }); }
     }
-    if (!(await authed(req, env))) return new Response("unauthorized", { status: 401, headers: { "www-authenticate": `Bearer resource_metadata="${url.origin}/.well-known/oauth-protected-resource"` } });
-    if (url.pathname === "/upload" && req.method === "POST") {
-      const bytes = new Uint8Array(await req.arrayBuffer());
-      if (!bytes.length || bytes.length > LIMITS.maxArchiveBytes) return new Response("size must be 1 byte to 20 MB", { status: 413 });
-      try { const f = detectFormat(bytes); readArchive(bytes); const name = (url.searchParams.get("name") || "upload").replace(/[^\w.-]/g, "_").slice(0, 80); const id = await store.put(bytes, name, f); return Response.json({ id }); }
-      catch (e) { return new Response("invalid archive: " + e.message, { status: 400 }); }
+    if (url.pathname.startsWith("/u/")) {
+      const t = url.pathname.slice(3);
+      if (req.method === "GET") {
+        if (!(await store.peekUploadToken(t))) return new Response("link expired or already used", { status: 410 });
+        return new Response(UPAGE(t), { headers: { "content-type": "text/html; charset=utf-8", "content-security-policy": "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; base-uri 'none'; form-action 'none'", "x-content-type-options": "nosniff", "referrer-policy": "no-referrer" } });
+      }
+      if (req.method === "POST") {
+        if (!(await store.takeUploadToken(t))) return new Response("link expired or already used", { status: 410 });
+        return acceptArchive(req, url, store);
+      }
+      return new Response("method not allowed", { status: 405 });
     }
+    if (!(await authed(req, env))) return new Response("unauthorized", { status: 401, headers: { "www-authenticate": `Bearer resource_metadata="${url.origin}/.well-known/oauth-protected-resource"` } });
+    if (url.pathname === "/upload" && req.method === "POST") return acceptArchive(req, url, store);
     if (url.pathname === "/mcp") {
       if (req.method === "GET") return new Response("use POST", { status: 405, headers: { allow: "POST" } });
       if (req.method !== "POST") return new Response("method not allowed", { status: 405 });

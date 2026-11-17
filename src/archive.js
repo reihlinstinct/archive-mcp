@@ -5,7 +5,7 @@ export const LIMITS = {
   maxArchiveBytes: 20 * 1024 * 1024, // compressed upload / output
   maxTotalBytes: 100 * 1024 * 1024, // total uncompressed
   maxFiles: 5000,
-  maxReadBytes: 256 * 1024, // per read_file call
+  maxReadBytes: 32 * 1024, // per read_file call: small results, per MCP client context guardrails
 };
 
 export function safePath(p) {

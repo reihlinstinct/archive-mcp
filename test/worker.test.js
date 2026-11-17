@@ -83,3 +83,23 @@ test("authorize rejects unknown redirect_uri and client", async () => {
   assert.equal((await call(e, `/authorize?${base}&client_id=cid&redirect_uri=${encodeURIComponent("https://evil.example/cb")}`)).status, 400);
   assert.equal((await call(e, `/authorize?${base}&client_id=nobody&redirect_uri=${encodeURIComponent("https://gemini.google.com/callback/mcp")}`)).status, 400);
 });
+
+test("one-time upload link flow (no bearer token needed)", async () => {
+  const e = env();
+  const r = await call(e, "/mcp", { method: "POST", headers: auth, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "request_upload_link", arguments: {} } }) }).then((x) => x.json());
+  const m = /https:\/\/w\.test\/u\/[\w-]+/.exec(r.result.content[0].text);
+  assert.ok(m, "link issued");
+  const path = m[0].replace("https://w.test", "");
+  const page = await call(e, path); // the link itself is the credential
+  assert.equal(page.status, 200);
+  const up = await call(e, path, { method: "POST", body: writeArchive({ "a.txt": strToU8("hi") }, "zip") });
+  assert.equal(up.status, 200);
+  const { id } = await up.json();
+  assert.match(id, /^[a-f0-9]{16}$/);
+  assert.equal((await call(e, path)).status, 410); // consumed after one upload
+  const read = await call(e, "/mcp", { method: "POST", headers: auth, body: JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "read_file", arguments: { id, path: "a.txt" } } }) }).then((x) => x.json());
+  assert.equal(read.result.content[0].text, "hi");
+});
+test("unknown upload tokens get 410, not 401", async () => {
+  assert.equal((await call(env(), "/u/" + "a".repeat(24))).status, 410);
+});
