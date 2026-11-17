@@ -54,7 +54,8 @@ function fileName(res, u) {
     const e = cd.indexOf('"', q + 10);
     if (e > q + 10) return cd.slice(q + 10, e);
   }
-  return decodeURIComponent(u.pathname.split("/").pop() || "");
+  const seg = u.pathname.split("/").pop() || "";
+  try { return decodeURIComponent(seg); } catch { return seg; } // malformed percent-encoding: use it raw, sanitized by the caller
 }
 
 // Download and fully validate the archive. Returns { bytes, format, name }.

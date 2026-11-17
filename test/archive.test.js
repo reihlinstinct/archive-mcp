@@ -106,3 +106,11 @@ test("debug_echo_context reports argument structure and client meta", async () =
   assert.match(t, /https:\/\/x\/f\.tar\.gz/);
   assert.match(t, /"session"/);
 });
+
+test("import_archive tolerates malformed percent-encoding in the URL path", async () => {
+  const s = mem();
+  const zip = writeArchive({ "a.txt": strToU8("hi") }, "zip");
+  const r = await callTool("import_archive", { url: "https://github.com/x/%zz.zip" }, s, async () => new Response(zip, { status: 200 }));
+  assert.ok(!r.isError);
+  assert.match(r.content[0].text, /Imported/);
+});
