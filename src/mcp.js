@@ -49,7 +49,7 @@ export async function callTool(name, args, store, fetchImpl = fetch, meta) {
     switch (name) {
       case "list_archives": {
         const items = await store.list();
-        return text(items.length ? items.map((i) => `${i.id}  ${i.name}  ${i.format}  ${i.size} bytes`).join("\n") : "No archives yet. Import one with import_archive (public link) or give the user a one-time upload link via request_upload_link.");
+        return text(items.length ? items.map((i) => `${i.id}  ${i.name}  ${i.format}  ${i.size} bytes  ${i.created ? new Date(i.created).toISOString() : "unknown-time"}`).join("\n") : "No archives yet. Import one with import_archive (public link) or give the user a one-time upload link via request_upload_link.");
       }
       case "import_archive": {
         const imp = await importFromUrl(args.url, fetchImpl);
