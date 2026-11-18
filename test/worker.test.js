@@ -103,3 +103,19 @@ test("one-time upload link flow (no bearer token needed)", async () => {
 test("unknown upload tokens get 410, not 401", async () => {
   assert.equal((await call(env(), "/u/" + "a".repeat(24))).status, 410);
 });
+
+test("cors: preflight and headers for browser-based MCP clients", async () => {
+  const e = env();
+  const pre = await call(e, "/mcp", { method: "OPTIONS", headers: { origin: "https://gemini.google.com", "access-control-request-method": "POST", "access-control-request-headers": "authorization, content-type" } });
+  assert.equal(pre.status, 204);
+  assert.equal(pre.headers.get("access-control-allow-origin"), "*");
+  assert.match(pre.headers.get("access-control-allow-headers"), /authorization/);
+  assert.match(pre.headers.get("access-control-allow-headers"), /content-type/);
+  assert.match(pre.headers.get("access-control-allow-headers"), /mcp-protocol-version/);
+  const meta = await call(e, "/.well-known/oauth-authorization-server", { headers: { origin: "https://gemini.google.com" } });
+  assert.equal(meta.headers.get("access-control-allow-origin"), "*");
+  const noAuth = await call(e, "/mcp", { method: "POST", headers: { origin: "https://gemini.google.com" }, body: "{}" });
+  assert.equal(noAuth.status, 401);
+  assert.equal(noAuth.headers.get("access-control-allow-origin"), "*");
+  assert.match(noAuth.headers.get("www-authenticate"), /resource_metadata/);
+});
