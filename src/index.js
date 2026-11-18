@@ -82,7 +82,7 @@ async function authed(req, env) {
 const PAGE = `<!doctype html><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><title>Archive upload</title>
 <body style="font-family:system-ui;max-width:32rem;margin:2rem auto;padding:0 1rem"><h1>Archive upload</h1>
 <p>ZIP or tar.gz, up to 20 MB. Stored encrypted for 24 hours. Do not upload personal or family data.</p>
-<input id=t type=password placeholder="access token" style="width:100%;margin:.3rem 0"><input id=f type=file accept=".zip,.tar.gz,.tgz" style="margin:.3rem 0"><br>
+<input id=t type=password placeholder="access token" style="width:100%;margin:.3rem 0"><input id=f type=file accept=".zip,.gz,.tgz,application/zip,application/gzip,application/x-gzip" style="margin:.3rem 0"><br>
 <button id=b>Upload</button><pre id=o></pre>
 <script>b.onclick=async()=>{const file=f.files[0];if(!file)return;o.textContent="Uploading...";
 const r=await fetch("/upload?name="+encodeURIComponent(file.name),{method:"POST",headers:{authorization:"Bearer "+t.value},body:file});
@@ -91,7 +91,7 @@ o.textContent=r.ok?"Archive id: "+(await r.json()).id:"Failed: "+r.status+" "+aw
 const UPAGE = (tok) => `<!doctype html><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><title>Archive upload</title>
 <body style="font-family:system-ui;max-width:32rem;margin:2rem auto;padding:0 1rem"><h1>Archive upload</h1>
 <p>One-time link: ZIP or tar.gz, up to 20 MB. Stored encrypted for 24 hours. Do not upload personal or family data.</p>
-<input id=f type=file accept=".zip,.tar.gz,.tgz"><br><br>
+<input id=f type=file accept=".zip,.gz,.tgz,application/zip,application/gzip,application/x-gzip"><br><br>
 <button id=b>Upload</button><pre id=o></pre>
 <script>b.onclick=async()=>{const file=f.files[0];if(!file)return;o.textContent="Uploading...";
 const r=await fetch("/u/${tok}",{method:"POST",body:file});
