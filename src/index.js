@@ -106,6 +106,9 @@ const CORS = {
   "access-control-allow-origin": "*",
   "access-control-allow-methods": "GET, POST, OPTIONS",
   "access-control-allow-headers": "authorization, content-type, mcp-protocol-version, mcp-session-id, last-event-id",
+  // Without this the browser hides WWW-Authenticate from fetch(), and OAuth
+  // discovery (which reads it on the 401) cannot start.
+  "access-control-expose-headers": "www-authenticate, mcp-protocol-version, mcp-session-id",
   "access-control-max-age": "86400",
 };
 const withCors = (res) => {
