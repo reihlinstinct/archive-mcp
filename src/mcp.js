@@ -1,11 +1,12 @@
 // Minimal stateless MCP (JSON-RPC 2.0 over streamable HTTP, JSON responses).
-import { readArchive, writeArchive, isText, strToU8, strFromU8, safePath, LIMITS } from "./archive.js";
+import { readArchive, writeArchive, isText, strToU8, strFromU8, safePath, detectFormat, LIMITS } from "./archive.js";
 import { importFromUrl } from "./import.js";
 
 export const TOOLS = [
   { name: "list_archives", description: "List archives currently on this server (id, name, format, size). Archives expire after 24 hours. Files attached in the chat are NOT here: import a public link with import_archive, or give the user a one-time upload link from request_upload_link.", inputSchema: { type: "object", properties: {} }, annotations: { readOnlyHint: true } },
   { name: "import_archive", description: "Import an archive (ZIP or tar.gz, up to 20 MB) from a public https link the user provides: a Google Drive 'anyone with the link' share link, a Dropbox share link, or a direct download link on GitHub or GitLab. Returns the archive id and its file tree. Use this whenever the user gives you a link to an archive; afterwards use list_files/read_file/search with the returned id.", inputSchema: { type: "object", properties: { url: { type: "string", description: "Public https link to the archive" }, name: { type: "string", description: "Optional display name" } }, required: ["url"] }, annotations: { readOnlyHint: false, openWorldHint: true } },
   { name: "request_upload_link", description: "Get a one-time upload link (valid 15 minutes, one archive up to 20 MB, no access token needed) and give it to the user. Use this when the user's archive is a local file or a chat attachment, which this server cannot see. After they upload, the page shows the new archive id and you can also call list_archives.", inputSchema: { type: "object", properties: {} }, annotations: { readOnlyHint: false } },
+  { name: "import_archive_inline", description: "Import a SMALL archive the client already holds as text: the ZIP or tar.gz bytes, base64-encoded, passed inline as an argument (max 24 KB of base64, about 18 KB decoded - measured as roughly what chat clients can generate in one tool call). Returns the archive id and its file tree. For anything bigger, a local file, or a chat attachment, use request_upload_link instead; for a public https link use import_archive.", inputSchema: { type: "object", properties: { content_base64: { type: "string", description: "Base64-encoded ZIP or tar.gz bytes, max 24576 characters" }, name: { type: "string", description: "Optional display name" } }, required: ["content_base64"] }, annotations: { readOnlyHint: false } },
   { name: "list_files", description: "List files inside an archive with sizes. Needs an archive id from list_archives or import_archive, or from the user after they upload.", inputSchema: { type: "object", properties: { id: { type: "string" }, prefix: { type: "string" } }, required: ["id"] }, annotations: { readOnlyHint: true } },
   { name: "read_file", description: "Read one text file from an archive. Returns at most 32 KB per call; use offset/length (bytes) to page through large files. Needs an archive id.", inputSchema: { type: "object", properties: { id: { type: "string" }, path: { type: "string" }, offset: { type: "integer" }, length: { type: "integer" } }, required: ["id", "path"] }, annotations: { readOnlyHint: true } },
   { name: "search", description: "Case-insensitive substring search across text files in an archive. Returns path:line matches. Needs an archive id.", inputSchema: { type: "object", properties: { id: { type: "string" }, query: { type: "string" }, max_results: { type: "integer" } }, required: ["id", "query"] }, annotations: { readOnlyHint: true } },
@@ -22,8 +23,9 @@ export function serverInstructions(store) {
   const page = store && store.origin ? store.origin + "/" : "the server's upload page";
   return "Archive-mcp reads and creates ZIP and tar.gz archives that live on this server; stored archives expire 24 hours after upload. " +
     "Files attached in this chat are never forwarded to this server. When the user gives a public link to an archive " +
-    "(Google Drive share link, Dropbox, GitHub, GitLab), import it with import_archive. When the user only has a local file " +
-    "or a chat attachment, give them a one-time upload link from request_upload_link (or the upload page at " + page + " with their access token). " +
+    "(Google Drive share link, Dropbox, GitHub, GitLab), import it with import_archive. A small archive (about 18 KB decoded or less) " +
+    "can be imported inline: base64-encode its bytes and call import_archive_inline. When the user only has a local file " +
+    "or a chat attachment, or the file is bigger than the inline limit, give them a one-time upload link from request_upload_link (or the upload page at " + page + " with their access token). " +
     "Once an archive is on the server, use list_files, read_file and search with the archive id, and create_archive to build new archives with a download link.";
 }
 const fail = (t) => ({ content: [{ type: "text", text: t }], isError: true });
@@ -60,6 +62,23 @@ export async function callTool(name, args, store, fetchImpl = fetch, meta) {
         const CAP = 200;
         const extra = rows.length > CAP ? `\n[${rows.length - CAP} more files; call list_files]` : "";
         return text(`Imported ${fname} (${rows.length} files, ${imp.bytes.length} bytes), id ${id}. Expires in 24 hours.\n` + rows.slice(0, CAP).join("\n") + extra);
+      }
+      case "import_archive_inline": {
+        const b64 = String(args.content_base64 || "");
+        if (b64.length > LIMITS.maxInlineBase64Chars) return fail(`inline content is limited to ${LIMITS.maxInlineBase64Chars} base64 characters (about 18 KB decoded) - this is roughly the largest tool argument chat clients deliver intact. For bigger files call request_upload_link (one-time link, up to 20 MB) or import_archive (public https link).`);
+        const clean = b64.replace(/\s+/g, "");
+        if (!clean || !/^[A-Za-z0-9+/]*={0,2}$/.test(clean) || clean.length % 4 !== 0) return fail("content_base64 is not valid base64. Encode the ZIP or tar.gz bytes as standard base64 and pass them as content_base64.");
+        let bytes;
+        try { bytes = Uint8Array.from(atob(clean), (c) => c.charCodeAt(0)); } catch { return fail("content_base64 is not valid base64."); }
+        const format = detectFormat(bytes); // throws unless ZIP or tar.gz
+        readArchive(bytes); // full parse: corrupt archives and path traversal rejected here
+        const fname = (String(args.name || "archive").replace(/[^\w.-]/g, "_").replace(/\.(zip|tar\.gz|tgz)$/i, "").slice(0, 60) || "archive") + (format === "zip" ? ".zip" : ".tar.gz");
+        const id = await store.put(bytes, fname, format);
+        const { files } = readArchive(bytes);
+        const rows = Object.keys(files).sort().map((p) => `${files[p].length}\t${p}`);
+        const CAP = 200;
+        const extra = rows.length > CAP ? `\n[${rows.length - CAP} more files; call list_files]` : "";
+        return text(`Imported ${fname} (${rows.length} files, ${bytes.length} bytes), id ${id}. Expires in 24 hours.\n` + rows.slice(0, CAP).join("\n") + extra);
       }
       case "debug_echo_context": {
         const report = { arguments: summarize(args, 0), client_meta: summarize(meta, 0) };

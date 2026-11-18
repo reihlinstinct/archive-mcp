@@ -6,6 +6,7 @@ export const LIMITS = {
   maxTotalBytes: 100 * 1024 * 1024, // total uncompressed
   maxFiles: 5000,
   maxReadBytes: 32 * 1024, // per read_file call: small results, per MCP client context guardrails
+  maxInlineBase64Chars: 24576, // import_archive_inline: 24 KB of base64 is ~18 KB decoded; chat clients cap generated tool arguments around this size
 };
 
 export function safePath(p) {
