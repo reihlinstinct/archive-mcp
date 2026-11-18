@@ -19,6 +19,15 @@ export function makeStore(env, origin) {
       await env.ARCHIVES.put("a:" + id, await encrypt(k, bytes), { expirationTtl: TTL, metadata: { name, format, size: bytes.length, created: Date.now() } });
       return id;
     },
+    // In-place update (edit_file): same id, fresh ciphertext and TTL,
+    // original created timestamp preserved when present.
+    async replace(id, bytes, name, format) {
+      if (!/^[a-f0-9]{16}$/.test(id || "")) throw new Error("bad archive id");
+      const prev = await env.ARCHIVES.getWithMetadata("a:" + id);
+      if (!prev || prev.value === null) throw new Error("archive not found or expired");
+      const created = prev.metadata && prev.metadata.created;
+      await env.ARCHIVES.put("a:" + id, await encrypt(k, bytes), { expirationTtl: TTL, metadata: { name, format, size: bytes.length, ...(created ? { created } : {}) } });
+    },
     async get(id) {
       if (!/^[a-f0-9]{16}$/.test(id || "")) throw new Error("bad archive id");
       const blob = await env.ARCHIVES.get("a:" + id, "arrayBuffer");
