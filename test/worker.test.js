@@ -139,3 +139,26 @@ test("upload pages accept .gz so macOS does not grey out .tar.gz", async () => {
   const page = await call(env(), "/");
   assert.match(await page.text(), /accept="[^"]*\.gz/);
 });
+
+test("edit_file: find/replace in place, atomic failures", async () => {
+  const e = env();
+  const up = await call(e, "/upload?name=e.zip", { method: "POST", headers: auth, body: writeArchive({ "a.txt": strToU8("one\ntwo one\nthree\n"), "b.bin": new Uint8Array([0, 1, 2, 255]) }, "zip") });
+  const { id } = await up.json();
+  const rpc = (name, args) => call(e, "/mcp", { method: "POST", headers: auth, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name, arguments: args } }) }).then((r) => r.json());
+  // default: first occurrence only
+  const r1 = await rpc("edit_file", { id, path: "a.txt", edits: [{ find: "one", replace: "ONE" }] });
+  assert.match(r1.result.content[0].text, /1 replacement.*line 1/s);
+  assert.equal((await rpc("read_file", { id, path: "a.txt" })).result.content[0].text, "ONE\ntwo one\nthree\n");
+  // count 0 replaces every occurrence, archive id unchanged
+  const r2 = await rpc("edit_file", { id, path: "a.txt", edits: [{ find: "one", replace: "1", count: 0 }] });
+  assert.match(r2.result.content[0].text, new RegExp("Edited a\\.txt in archive " + id));
+  assert.match(r2.result.content[0].text, /1 replacement/);
+  // missing find fails atomically: earlier valid edit in the same call is not written either
+  const before = (await rpc("read_file", { id, path: "a.txt" })).result.content[0].text;
+  const r3 = await rpc("edit_file", { id, path: "a.txt", edits: [{ find: "three", replace: "3" }, { find: "nope", replace: "x" }] });
+  assert.match(r3.result.content[0].text, /edit 2: find text not present/);
+  assert.equal((await rpc("read_file", { id, path: "a.txt" })).result.content[0].text, before);
+  // binary and missing files rejected
+  assert.match((await rpc("edit_file", { id, path: "b.bin", edits: [{ find: "x", replace: "y" }] })).result.content[0].text, /binary file/);
+  assert.match((await rpc("edit_file", { id, path: "zzz", edits: [{ find: "x", replace: "y" }] })).result.content[0].text, /no such file/);
+});
