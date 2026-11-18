@@ -119,3 +119,10 @@ test("cors: preflight and headers for browser-based MCP clients", async () => {
   assert.equal(noAuth.headers.get("access-control-allow-origin"), "*");
   assert.match(noAuth.headers.get("www-authenticate"), /resource_metadata/);
 });
+
+test("cors: exposes www-authenticate so browser clients can start OAuth", async () => {
+  const r = await call(env(), "/mcp", { method: "POST", headers: { origin: "https://claude.ai" }, body: "{}" });
+  assert.equal(r.status, 401);
+  assert.match(r.headers.get("access-control-expose-headers"), /www-authenticate/);
+  assert.match(r.headers.get("access-control-expose-headers"), /mcp-session-id/);
+});
