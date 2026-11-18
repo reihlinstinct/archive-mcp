@@ -97,8 +97,31 @@ const UPAGE = (tok) => `<!doctype html><meta charset=utf-8><meta name=viewport c
 const r=await fetch("/u/${tok}",{method:"POST",body:file});
 o.textContent=r.ok?"Done. Archive id: "+(await r.json()).id+" - go back to your chat and say it is uploaded; the assistant can list it.":"Failed: "+r.status+" "+await r.text()}</script>`;
 
+// Browser-based MCP clients (Gemini Developer Mode connect dialog, claude.ai)
+// fetch the server cross-origin: metadata, /mcp, and the 401's WWW-Authenticate
+// that starts OAuth. Without CORS headers the browser hides all of it and the
+// connect flow stalls. Auth here is bearer/OAuth tokens in the Authorization
+// header, never cookies, so ACAO * exposes nothing ambient.
+const CORS = {
+  "access-control-allow-origin": "*",
+  "access-control-allow-methods": "GET, POST, OPTIONS",
+  "access-control-allow-headers": "authorization, content-type, mcp-protocol-version, mcp-session-id, last-event-id",
+  "access-control-max-age": "86400",
+};
+const withCors = (res) => {
+  const r = new Response(res.body, res);
+  for (const [k, v] of Object.entries(CORS)) if (!r.headers.has(k)) r.headers.set(k, v);
+  return r;
+};
+
 export default {
   async fetch(req, env) {
+    if (req.method === "OPTIONS") return new Response(null, { status: 204, headers: CORS });
+    return withCors(await route(req, env));
+  },
+};
+
+async function route(req, env) {
     const url = new URL(req.url);
     const store = makeStore(env, url.origin);
     if (url.pathname === "/" && req.method === "GET") return new Response(PAGE, { headers: { "content-type": "text/html; charset=utf-8", "content-security-policy": "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; base-uri 'none'; form-action 'none'", "x-content-type-options": "nosniff", "referrer-policy": "no-referrer" } });
@@ -141,5 +164,4 @@ export default {
       return Response.json(batch ? out : out[0]);
     }
     return new Response("not found", { status: 404 });
-  },
-};
+}
