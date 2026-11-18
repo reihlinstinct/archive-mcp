@@ -71,10 +71,9 @@ export async function callTool(name, args, store, fetchImpl = fetch, meta) {
         let bytes;
         try { bytes = Uint8Array.from(atob(clean), (c) => c.charCodeAt(0)); } catch { return fail("content_base64 is not valid base64."); }
         const format = detectFormat(bytes); // throws unless ZIP or tar.gz
-        readArchive(bytes); // full parse: corrupt archives and path traversal rejected here
+        const { files } = readArchive(bytes); // full parse: corrupt archives and path traversal rejected here
         const fname = (String(args.name || "archive").replace(/[^\w.-]/g, "_").replace(/\.(zip|tar\.gz|tgz)$/i, "").slice(0, 60) || "archive") + (format === "zip" ? ".zip" : ".tar.gz");
         const id = await store.put(bytes, fname, format);
-        const { files } = readArchive(bytes);
         const rows = Object.keys(files).sort().map((p) => `${files[p].length}\t${p}`);
         const CAP = 200;
         const extra = rows.length > CAP ? `\n[${rows.length - CAP} more files; call list_files]` : "";
