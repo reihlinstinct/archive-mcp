@@ -126,3 +126,8 @@ test("cors: exposes www-authenticate so browser clients can start OAuth", async 
   assert.match(r.headers.get("access-control-expose-headers"), /www-authenticate/);
   assert.match(r.headers.get("access-control-expose-headers"), /mcp-session-id/);
 });
+
+test("upload pages accept .gz so macOS does not grey out .tar.gz", async () => {
+  const page = await call(env(), "/");
+  assert.match(await page.text(), /accept="[^"]*\.gz/);
+});
