@@ -161,4 +161,21 @@ test("edit_file: find/replace in place, atomic failures", async () => {
   // binary and missing files rejected
   assert.match((await rpc("edit_file", { id, path: "b.bin", edits: [{ find: "x", replace: "y" }] })).result.content[0].text, /binary file/);
   assert.match((await rpc("edit_file", { id, path: "zzz", edits: [{ find: "x", replace: "y" }] })).result.content[0].text, /no such file/);
+  // archive keeps its original name after edit (no fallback to literal "archive")
+  const listing = await rpc("list_archives", {});
+  assert.match(listing.result.content[0].text, new RegExp("e\\.zip"));
+  assert.doesNotMatch(listing.result.content[0].text, new RegExp("\\barchive\\b(?!\\.)"));
+  // line number is right after several length-changing replacements on one line
+  const up2 = await call(e, "/upload?name=g.zip", { method: "POST", headers: auth, body: writeArchive({ "m.txt": strToU8("a b a b a\nsecond line\nthird\n") }, "zip") });
+  const id2 = (await up2.json()).id;
+  const rm = await rpc("edit_file", { id: id2, path: "m.txt", edits: [{ find: "a b ", replace: "aaa bbb ", count: 3 }] });
+  const lineNo = Number((rm.result.content[0].text.match(/First change at line (\d+)/) || [])[1]);
+  const edited = (await rpc("read_file", { id: id2, path: "m.txt" })).result.content[0].text;
+  const lines = edited.split("\n");
+  assert.equal(lineNo, 1);
+  assert.match(lines[lineNo - 1], /aaa bbb/);
+  // first change on a later line: replace only on line 2
+  const rl = await rpc("edit_file", { id: id2, path: "m.txt", edits: [{ find: "second", replace: "SECOND" }] });
+  const lineNo2 = Number((rl.result.content[0].text.match(/First change at line (\d+)/) || [])[1]);
+  assert.equal(lineNo2, 2);
 });
