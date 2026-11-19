@@ -157,10 +157,16 @@ test("import_archive_inline: round trip, validation, cap", async () => {
   assert.match((await rpc("import_archive_inline", { content_base64: "!!!" })).result.content[0].text, /not valid base64/);
   assert.match((await rpc("import_archive_inline", { content_base64: b64(strToU8("plain text")) })).result.content[0].text, /unsupported format/);
   // over-cap input points to the upload-link route
-  const big = Buffer.alloc(24577, 65).toString("base64");
+  const big = Buffer.alloc(16001, 65).toString("base64");
   const over = await rpc("import_archive_inline", { content_base64: big });
   assert.equal(over.result.isError, true);
   assert.match(over.result.content[0].text, /request_upload_link/);
+  // padding and structure are verified: missing padding, bad magic, corrupt container
+  assert.match((await rpc("import_archive_inline", { content_base64: "QUJ" })).result.content[0].text, /not valid base64/);
+  const corrupt = await rpc("import_archive_inline", { content_base64: b64(new Uint8Array([80, 75, 3, 4, 1, 2, 3])) });
+  assert.equal(corrupt.result.isError, true);
+  const badmagic = await rpc("import_archive_inline", { content_base64: b64(strToU8("PK-not-a-zip-payload!")) });
+  assert.equal(badmagic.result.isError, true);
   // whitespace inside the base64 is tolerated
   const packed = writeArchive({ "a.txt": strToU8("ws") }, "zip");
   const chunked = b64(packed).replace(/.{40}/g, "$&\n");
