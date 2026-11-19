@@ -21,12 +21,21 @@ export function makeStore(env, origin) {
     },
     // In-place update (edit_file): same id, fresh ciphertext and TTL,
     // original created timestamp preserved when present.
-    async replace(id, bytes, name, format) {
+    async replace(id, bytes, opts = {}) {
       if (!/^[a-f0-9]{16}$/.test(id || "")) throw new Error("bad archive id");
       const prev = await env.ARCHIVES.getWithMetadata("a:" + id);
       if (!prev || prev.value === null) throw new Error("archive not found or expired");
-      const created = prev.metadata && prev.metadata.created;
-      await env.ARCHIVES.put("a:" + id, await encrypt(k, bytes), { expirationTtl: TTL, metadata: { name, format, size: bytes.length, ...(created ? { created } : {}) } });
+      const meta = prev.metadata || {};
+      // optimistic concurrency: if the archive changed (size moved) since the
+      // caller read it, refuse so the caller can retry instead of losing edits
+      if (opts.expectSize != null && meta.size !== opts.expectSize) {
+        const e = new Error("archive changed during edit");
+        e.code = "CONFLICT";
+        throw e;
+      }
+      const name = opts.name || meta.name || "archive";
+      const format = opts.format || meta.format;
+      await env.ARCHIVES.put("a:" + id, await encrypt(k, bytes), { expirationTtl: TTL, metadata: { name, format, size: bytes.length, ...(meta.created ? { created: meta.created } : {}) } });
     },
     async get(id) {
       if (!/^[a-f0-9]{16}$/.test(id || "")) throw new Error("bad archive id");
