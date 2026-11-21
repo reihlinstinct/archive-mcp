@@ -1,8 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { strToU8 } from "fflate";
-import worker from "../src/index.js";
+import worker, { makeStore } from "../src/index.js";
 import { writeArchive } from "../src/archive.js";
+import { digestHex } from "../src/crypto.js";
 
 function kv() { const m = new Map(); return { async put(k, v, o) { m.set(k, { v: v && v.buffer ? v.buffer.slice(v.byteOffset, v.byteOffset + v.byteLength) : v, meta: o?.metadata }); }, async delete(k) { m.delete(k); }, async get(k) { return m.get(k)?.v ?? null; }, async getWithMetadata(k) { const e = m.get(k); return { value: e?.v, metadata: e?.meta }; }, async list() { return { keys: [...m].map(([name, e]) => ({ name, metadata: e.meta })) }; } }; }
 const env = () => ({ AUTH_TOKEN: "tok", ENC_SECRET: "enc", ARCHIVES: kv() });
@@ -211,4 +212,23 @@ test("edit_file: find/replace in place, atomic failures", async () => {
   const rl = await rpc("edit_file", { id: id2, path: "m.txt", edits: [{ find: "second", replace: "SECOND" }] });
   const lineNo2 = Number((rl.result.content[0].text.match(/First change at line (\d+)/) || [])[1]);
   assert.equal(lineNo2, 2);
+});
+
+test("store.replace: same-size concurrent edit is refused by content revision", async () => {
+  const store = makeStore(env(), "https://w.test");
+  const v1 = strToU8("alpha content, exactly 32 bytes!!");
+  const v2 = strToU8("BETA  content, exactly 32 bytes##");
+  assert.equal(v1.length, v2.length, "test needs same-length contents");
+  const id = await store.put(v1, "r.zip", "zip");
+  // a caller reads the archive and notes its revision
+  const staleRev = await digestHex(v1);
+  // a concurrent edit writes different content of the SAME byte length
+  await store.replace(id, v2, { expectSize: v1.length, expectRev: staleRev });
+  // the stale caller's write passes the old size check but must be refused on revision
+  await assert.rejects(
+    store.replace(id, v1, { expectSize: v1.length, expectRev: staleRev }),
+    (err) => err.code === "CONFLICT" && /archive changed/.test(err.message)
+  );
+  // the newer content survives
+  assert.deepEqual(new Uint8Array(await store.get(id)), v2);
 });
