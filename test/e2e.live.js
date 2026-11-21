@@ -4,9 +4,10 @@
 //
 //   BASE=https://<worker>.workers.dev AUTH_TOKEN=... \
 //   OAUTH_CLIENT_ID=... OAUTH_CLIENT_SECRET=... REDIRECT_URI=https://example.invalid/cb \
-//   node test/e2e.live.mjs
-import { zipSync, unzipSync, strToU8, strFromU8 } from "fflate";
+//   node test/e2e.live.js
+import { zipSync, strToU8, strFromU8 } from "fflate";
 import { writeArchive, readArchive } from "../src/archive.js";
+import { redact } from "./redact.js";
 
 const BASE = process.env.BASE;
 const TOKEN = process.env.AUTH_TOKEN || "";
@@ -16,9 +17,12 @@ const RU = process.env.REDIRECT_URI || "https://example.invalid/oauth-callback";
 if (!BASE) { console.error("BASE is required"); process.exit(2); }
 
 let pass = 0, fail = 0;
+// Failure output goes through redact(): response snippets can contain
+// short-lived capability URLs (one-time upload links, signed download
+// URLs) that must not land in captured logs.
 const check = (name, cond, extra = "") => {
   if (cond) { pass++; console.log("PASS", name); }
-  else { fail++; console.log("FAIL", name, extra); }
+  else { fail++; console.log("FAIL", name, redact(extra, [TOKEN, CSEC])); }
 };
 const rpc = async (name, args, tok = TOKEN) => {
   const r = await fetch(BASE + "/mcp", { method: "POST", headers: { "content-type": "application/json", authorization: "Bearer " + tok }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name, arguments: args } }) });

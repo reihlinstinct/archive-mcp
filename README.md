@@ -38,7 +38,7 @@ OAUTH_CLIENT_ID=... OAUTH_CLIENT_SECRET=... REDIRECT_URI=https://example.invalid
 node test/e2e.live.js
 ```
 
-Delete the throwaway Worker and its KV namespace afterwards. One behavior to know: Workers KV `list()` is eventually consistent, so a fresh upload can take up to about a minute to appear in `list_archives` (the suite polls for it).
+`REDIRECT_URI` must exactly match one entry in the Worker's `OAUTH_REDIRECT_URIS` secret, and the `import_archive` checks need the Worker to have outbound network access to github.com (it fetches this repo's main.zip). Failure output redacts capability URLs (one-time upload links, download signatures) and the supplied secrets. Delete the throwaway Worker and its KV namespace afterwards. One behavior to know: Workers KV `list()` is eventually consistent, so a fresh upload can take up to about a minute to appear in `list_archives` (the suite polls for it).
 
 ## Security
 
