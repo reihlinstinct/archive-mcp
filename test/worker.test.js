@@ -216,8 +216,8 @@ test("edit_file: find/replace in place, atomic failures", async () => {
 
 test("store.replace: same-size concurrent edit is refused by content revision", async () => {
   const store = makeStore(env(), "https://w.test");
-  const v1 = strToU8("alpha content, exactly 32 bytes!!");
-  const v2 = strToU8("BETA  content, exactly 32 bytes##");
+  const v1 = strToU8("alpha content, exactly 32 bytes!");
+  const v2 = strToU8("BETA  content, exactly 32 bytes#");
   assert.equal(v1.length, v2.length, "test needs same-length contents");
   const id = await store.put(v1, "r.zip", "zip");
   // a caller reads the archive and notes its revision
@@ -231,4 +231,23 @@ test("store.replace: same-size concurrent edit is refused by content revision", 
   );
   // the newer content survives
   assert.deepEqual(new Uint8Array(await store.get(id)), v2);
+});
+
+test("edit_file: archives stored before revisions existed stay editable", async () => {
+  // simulate a legacy archive: stored with metadata that has no content revision
+  const e = env();
+  const realPut = e.ARCHIVES.put;
+  e.ARCHIVES.put = async (k, v, o) => {
+    if (o && o.metadata && "rev" in o.metadata) {
+      const { rev, ...rest } = o.metadata;
+      return realPut(k, v, { ...o, metadata: rest });
+    }
+    return realPut(k, v, o);
+  };
+  const up = await call(e, "/upload?name=legacy.zip", { method: "POST", headers: auth, body: writeArchive({ "a.txt": strToU8("old\ncontent\n") }, "zip") });
+  const { id } = await up.json();
+  const rpc = (name, args) => call(e, "/mcp", { method: "POST", headers: auth, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name, arguments: args } }) }).then((r) => r.json());
+  const r = await rpc("edit_file", { id, path: "a.txt", edits: [{ find: "old", replace: "new" }] });
+  assert.match(r.result.content[0].text, /Edited a\.txt/);
+  assert.equal((await rpc("read_file", { id, path: "a.txt" })).result.content[0].text, "new\ncontent\n");
 });
