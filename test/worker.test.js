@@ -127,6 +127,14 @@ test("cors: exposes www-authenticate so browser clients can start OAuth", async 
   assert.match(r.headers.get("access-control-expose-headers"), /mcp-session-id/);
 });
 
+test("list_archives rows carry created timestamps", async () => {
+  const e = env();
+  await call(e, "/upload?name=t.zip", { method: "POST", headers: auth, body: writeArchive({ "a.txt": strToU8("x") }, "zip") });
+  const r = await call(e, "/mcp", { method: "POST", headers: auth, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "list_archives", arguments: {} } }) }).then((x) => x.json());
+  assert.match(r.result.content[0].text, /t\.zip  zip  \d+ bytes  \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z/);
+});
+
+
 test("upload pages accept .gz so macOS does not grey out .tar.gz", async () => {
   const page = await call(env(), "/");
   assert.match(await page.text(), /accept="[^"]*\.gz/);

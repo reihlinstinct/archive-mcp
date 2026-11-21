@@ -16,7 +16,7 @@ export function makeStore(env, origin) {
     origin,
     async put(bytes, name, format) {
       const id = crypto.randomUUID().replace(/-/g, "").slice(0, 16);
-      await env.ARCHIVES.put("a:" + id, await encrypt(k, bytes), { expirationTtl: TTL, metadata: { name, format, size: bytes.length } });
+      await env.ARCHIVES.put("a:" + id, await encrypt(k, bytes), { expirationTtl: TTL, metadata: { name, format, size: bytes.length, created: Date.now() } });
       return id;
     },
     async get(id) {
