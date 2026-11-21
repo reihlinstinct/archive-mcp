@@ -1,6 +1,6 @@
 import { handleRpc } from "./mcp.js";
 import { detectFormat, readArchive, LIMITS } from "./archive.js";
-import { encrypt, decrypt, sign, safeEqual } from "./crypto.js";
+import { encrypt, decrypt, sign, safeEqual, digestHex } from "./crypto.js";
 import { authorizationServerMetadata, protectedResourceMetadata, handleAuthorize, handleToken, oauthTokenValid } from "./oauth.js";
 
 const TTL = 24 * 3600;
@@ -16,8 +16,38 @@ export function makeStore(env, origin) {
     origin,
     async put(bytes, name, format) {
       const id = crypto.randomUUID().replace(/-/g, "").slice(0, 16);
-      await env.ARCHIVES.put("a:" + id, await encrypt(k, bytes), { expirationTtl: TTL, metadata: { name, format, size: bytes.length, created: Date.now() } });
+      await env.ARCHIVES.put("a:" + id, await encrypt(k, bytes), { expirationTtl: TTL, metadata: { name, format, size: bytes.length, rev: await digestHex(bytes), created: Date.now() } });
       return id;
+    },
+    // In-place update (edit_file): same id, fresh ciphertext and TTL,
+    // original created timestamp preserved when present.
+    async replace(id, bytes, opts = {}) {
+      if (!/^[a-f0-9]{16}$/.test(id || "")) throw new Error("bad archive id");
+      const prev = await env.ARCHIVES.getWithMetadata("a:" + id);
+      if (!prev || prev.value === null) throw new Error("archive not found or expired");
+      const meta = prev.metadata || {};
+      // optimistic concurrency: if the archive changed since the caller read
+      // it, refuse so the caller can retry instead of losing edits. Size alone
+      // misses same-length edits, so the content revision (SHA-256 of the
+      // plaintext) is compared when the caller supplies one. Archives stored
+      // before revisions existed have no rev to compare; for their remaining
+      // TTL they fall back to the size check only.
+      if (opts.expectSize != null && meta.size !== opts.expectSize) {
+        const e = new Error("archive changed during edit");
+        e.code = "CONFLICT";
+        throw e;
+      }
+      if (opts.expectRev != null && meta.rev != null && meta.rev !== opts.expectRev) {
+        const e = new Error("archive changed during edit");
+        e.code = "CONFLICT";
+        throw e;
+      }
+      const name = opts.name || meta.name || "archive";
+      const format = opts.format || meta.format;
+      // an edit must not extend the archive's life: keep the original 24h
+      // expiry (absolute `expiration` from the created timestamp) when known
+      const expiry = meta.created ? { expiration: Math.floor(meta.created / 1000) + TTL } : { expirationTtl: TTL };
+      await env.ARCHIVES.put("a:" + id, await encrypt(k, bytes), { ...expiry, metadata: { name, format, size: bytes.length, rev: await digestHex(bytes), ...(meta.created ? { created: meta.created } : {}) } });
     },
     async get(id) {
       if (!/^[a-f0-9]{16}$/.test(id || "")) throw new Error("bad archive id");

@@ -1,6 +1,7 @@
 // Minimal stateless MCP (JSON-RPC 2.0 over streamable HTTP, JSON responses).
 import { readArchive, writeArchive, isText, strToU8, strFromU8, safePath, detectFormat, LIMITS } from "./archive.js";
 import { importFromUrl } from "./import.js";
+import { digestHex } from "./crypto.js";
 
 export const TOOLS = [
   { name: "list_archives", description: "List archives currently on this server (id, name, format, size). Archives expire after 24 hours. Files attached in the chat are NOT here: import a public link with import_archive, or give the user a one-time upload link from request_upload_link.", inputSchema: { type: "object", properties: {} }, annotations: { readOnlyHint: true } },
@@ -11,6 +12,7 @@ export const TOOLS = [
   { name: "read_file", description: "Read one text file from an archive. Returns at most 32 KB per call; use offset/length (bytes) to page through large files. Needs an archive id.", inputSchema: { type: "object", properties: { id: { type: "string" }, path: { type: "string" }, offset: { type: "integer" }, length: { type: "integer" } }, required: ["id", "path"] }, annotations: { readOnlyHint: true } },
   { name: "search", description: "Case-insensitive substring search across text files in an archive. Returns path:line matches. Needs an archive id.", inputSchema: { type: "object", properties: { id: { type: "string" }, query: { type: "string" }, max_results: { type: "integer" } }, required: ["id", "query"] }, annotations: { readOnlyHint: true } },
   { name: "debug_echo_context", description: "Diagnostic: echo back exactly what arguments and context the client passed to this tool (keys, types, sizes, short previews). Nothing is stored beyond a 1-hour structural log without file contents. Use only when the user asks what the client sends to this server.", inputSchema: { type: "object", additionalProperties: true }, annotations: { readOnlyHint: true } },
+  { name: "edit_file", description: "Edit one text file inside an archive with literal find/replace, applied server-side, so even large files can be edited with tiny arguments (rewriting a whole file through create_archive needs its full content inline, which chat clients cannot generate beyond a few KB). The archive keeps the same id. Editing is read-modify-write with a content revision check: if the archive changed between this call's read and its write (even to different content of the same byte length), the write is refused and the call retries once on fresh content. The check catches sequential stale writes only; two edits started at the same instant can still race because Workers KV has no atomic compare-and-swap (accepted limitation), so edit one archive at a time. Editing does not extend the archive's 24-hour lifetime. Edits apply in order; each find must be present or nothing is written. Afterwards repack or download with create_archive (base_id) as usual.", inputSchema: { type: "object", properties: { id: { type: "string" }, path: { type: "string" }, edits: { type: "array", items: { type: "object", properties: { find: { type: "string", description: "Literal text to find; must occur or the whole call fails" }, replace: { type: "string", description: "Replacement text (may be empty)" }, count: { type: "integer", description: "Max replacements, default 1; pass 0 to replace every occurrence" } }, required: ["find", "replace"] } } }, required: ["id", "path", "edits"] }, annotations: { readOnlyHint: false } },
   { name: "create_archive", description: "Create a ZIP or tar.gz from files (path + text content). With base_id, start from that archive: files overwrite or add, delete_paths removes. Returns an id and a short-lived download URL the user can open.", inputSchema: { type: "object", properties: { format: { type: "string", enum: ["zip", "tar.gz"] }, name: { type: "string" }, base_id: { type: "string" }, files: { type: "array", items: { type: "object", properties: { path: { type: "string" }, content: { type: "string" } }, required: ["path", "content"] } }, delete_paths: { type: "array", items: { type: "string" } } }, required: ["format", "name"] }, annotations: { readOnlyHint: false } },
 ];
 
@@ -116,6 +118,57 @@ export async function callTool(name, args, store, fetchImpl = fetch, meta) {
           strFromU8(files[p]).split("\n").forEach((l, i) => { if (out.length < max && l.toLowerCase().includes(q)) out.push(`${p}:${i + 1}: ${l.slice(0, 200)}`); });
         }
         return text(out.length ? out.join("\n") : "no matches");
+      }
+      case "edit_file": {
+        const p = safePath(String(args.path || ""));
+        const edits = Array.isArray(args.edits) ? args.edits : [];
+        if (!edits.length) return fail("edits must be a non-empty array of {find, replace, count?}");
+        // read-modify-write with optimistic concurrency: store.replace refuses
+        // (code CONFLICT) if the archive changed since we read it; retry once.
+        let attempt = 0, result;
+        while (true) {
+          try {
+            const bytes = await store.get(args.id);
+            const format = detectFormat(bytes);
+            const { files } = readArchive(bytes);
+            const data = files[p];
+            if (!data) return fail("no such file: " + args.path);
+            if (!isText(data)) return fail(`binary file, ${data.length} bytes - edit_file handles text files only`);
+            const orig = strFromU8(data);
+            let s = orig;
+            let total = 0;
+            for (let i = 0; i < edits.length; i++) {
+              const f = String(edits[i] && edits[i].find != null ? edits[i].find : "");
+              const r = String(edits[i] && edits[i].replace != null ? edits[i].replace : "");
+              if (!f) return fail(`edit ${i + 1}: find must be non-empty`);
+              if (!s.includes(f)) return fail(`edit ${i + 1}: find text not present, no changes written: ${JSON.stringify(f.slice(0, 80))}`);
+              const max = edits[i].count > 0 ? Math.floor(edits[i].count) : edits[i].count === 0 ? Infinity : 1;
+              let from = 0, out = "", done = 0;
+              while (done < max) {
+                const at = s.indexOf(f, from);
+                if (at < 0) break;
+                out += s.slice(from, at) + r;
+                from = at + f.length;
+                done++;
+              }
+              s = out + s.slice(from);
+              total += done;
+            }
+            files[p] = strToU8(s);
+            await store.replace(args.id, writeArchive(files, format), { expectSize: bytes.length, expectRev: await digestHex(bytes) });
+            // first changed line: where the edited text first diverges from the original
+            let d = 0;
+            while (d < orig.length && d < s.length && orig[d] === s[d]) d++;
+            const ln = s.slice(0, d).split("\n").length;
+            const lines = s.split("\n");
+            result = text(`Edited ${p} in archive ${args.id} (same id): ${total} replacement${total === 1 ? "" : "s"} across ${edits.length} edit${edits.length === 1 ? "" : "s"}. First change at line ${ln}:\n${p}:${ln}: ${lines[ln - 1] ? lines[ln - 1].slice(0, 200) : ""}`);
+            break;
+          } catch (e) {
+            if (e && e.code === "CONFLICT" && attempt++ === 0) continue;
+            throw e;
+          }
+        }
+        return result;
       }
       case "create_archive": {
         if (!["zip", "tar.gz"].includes(args.format)) return fail("format must be zip or tar.gz");

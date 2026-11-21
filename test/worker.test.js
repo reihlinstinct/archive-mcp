@@ -1,8 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { strToU8 } from "fflate";
-import worker from "../src/index.js";
+import worker, { makeStore } from "../src/index.js";
 import { writeArchive } from "../src/archive.js";
+import { digestHex } from "../src/crypto.js";
 
 function kv() { const m = new Map(); return { async put(k, v, o) { m.set(k, { v: v && v.buffer ? v.buffer.slice(v.byteOffset, v.byteOffset + v.byteLength) : v, meta: o?.metadata }); }, async delete(k) { m.delete(k); }, async get(k) { return m.get(k)?.v ?? null; }, async getWithMetadata(k) { const e = m.get(k); return { value: e?.v, metadata: e?.meta }; }, async list() { return { keys: [...m].map(([name, e]) => ({ name, metadata: e.meta })) }; } }; }
 const env = () => ({ AUTH_TOKEN: "tok", ENC_SECRET: "enc", ARCHIVES: kv() });
@@ -171,4 +172,82 @@ test("import_archive_inline: round trip, validation, cap", async () => {
   const packed = writeArchive({ "a.txt": strToU8("ws") }, "zip");
   const chunked = b64(packed).replace(/.{40}/g, "$&\n");
   assert.match((await rpc("import_archive_inline", { content_base64: chunked })).result.content[0].text, /Imported archive\.zip/);
+});
+
+test("edit_file: find/replace in place, atomic failures", async () => {
+  const e = env();
+  const up = await call(e, "/upload?name=e.zip", { method: "POST", headers: auth, body: writeArchive({ "a.txt": strToU8("one\ntwo one\nthree\n"), "b.bin": new Uint8Array([0, 1, 2, 255]) }, "zip") });
+  const { id } = await up.json();
+  const rpc = (name, args) => call(e, "/mcp", { method: "POST", headers: auth, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name, arguments: args } }) }).then((r) => r.json());
+  // default: first occurrence only
+  const r1 = await rpc("edit_file", { id, path: "a.txt", edits: [{ find: "one", replace: "ONE" }] });
+  assert.match(r1.result.content[0].text, /1 replacement.*line 1/s);
+  assert.equal((await rpc("read_file", { id, path: "a.txt" })).result.content[0].text, "ONE\ntwo one\nthree\n");
+  // count 0 replaces every occurrence, archive id unchanged
+  const r2 = await rpc("edit_file", { id, path: "a.txt", edits: [{ find: "one", replace: "1", count: 0 }] });
+  assert.match(r2.result.content[0].text, new RegExp("Edited a\\.txt in archive " + id));
+  assert.match(r2.result.content[0].text, /1 replacement/);
+  // missing find fails atomically: earlier valid edit in the same call is not written either
+  const before = (await rpc("read_file", { id, path: "a.txt" })).result.content[0].text;
+  const r3 = await rpc("edit_file", { id, path: "a.txt", edits: [{ find: "three", replace: "3" }, { find: "nope", replace: "x" }] });
+  assert.match(r3.result.content[0].text, /edit 2: find text not present/);
+  assert.equal((await rpc("read_file", { id, path: "a.txt" })).result.content[0].text, before);
+  // binary and missing files rejected
+  assert.match((await rpc("edit_file", { id, path: "b.bin", edits: [{ find: "x", replace: "y" }] })).result.content[0].text, /binary file/);
+  assert.match((await rpc("edit_file", { id, path: "zzz", edits: [{ find: "x", replace: "y" }] })).result.content[0].text, /no such file/);
+  // archive keeps its original name after edit (no fallback to literal "archive")
+  const listing = await rpc("list_archives", {});
+  assert.match(listing.result.content[0].text, new RegExp("e\\.zip"));
+  assert.doesNotMatch(listing.result.content[0].text, new RegExp("\\barchive\\b(?!\\.)"));
+  // line number is right after several length-changing replacements on one line
+  const up2 = await call(e, "/upload?name=g.zip", { method: "POST", headers: auth, body: writeArchive({ "m.txt": strToU8("a b a b a\nsecond line\nthird\n") }, "zip") });
+  const id2 = (await up2.json()).id;
+  const rm = await rpc("edit_file", { id: id2, path: "m.txt", edits: [{ find: "a b ", replace: "aaa bbb ", count: 3 }] });
+  const lineNo = Number((rm.result.content[0].text.match(/First change at line (\d+)/) || [])[1]);
+  const edited = (await rpc("read_file", { id: id2, path: "m.txt" })).result.content[0].text;
+  const lines = edited.split("\n");
+  assert.equal(lineNo, 1);
+  assert.match(lines[lineNo - 1], /aaa bbb/);
+  // first change on a later line: replace only on line 2
+  const rl = await rpc("edit_file", { id: id2, path: "m.txt", edits: [{ find: "second", replace: "SECOND" }] });
+  const lineNo2 = Number((rl.result.content[0].text.match(/First change at line (\d+)/) || [])[1]);
+  assert.equal(lineNo2, 2);
+});
+
+test("store.replace: same-size concurrent edit is refused by content revision", async () => {
+  const store = makeStore(env(), "https://w.test");
+  const v1 = strToU8("alpha content, exactly 32 bytes!");
+  const v2 = strToU8("BETA  content, exactly 32 bytes#");
+  assert.equal(v1.length, v2.length, "test needs same-length contents");
+  const id = await store.put(v1, "r.zip", "zip");
+  // a caller reads the archive and notes its revision
+  const staleRev = await digestHex(v1);
+  // a concurrent edit writes different content of the SAME byte length
+  await store.replace(id, v2, { expectSize: v1.length, expectRev: staleRev });
+  // the stale caller's write passes the old size check but must be refused on revision
+  await assert.rejects(
+    store.replace(id, v1, { expectSize: v1.length, expectRev: staleRev }),
+    (err) => err.code === "CONFLICT" && /archive changed/.test(err.message)
+  );
+  // the newer content survives
+  assert.deepEqual(new Uint8Array(await store.get(id)), v2);
+});
+
+test("edit_file: archives stored before revisions existed stay editable", async () => {
+  // simulate a legacy archive: stored with metadata that has no content revision
+  const e = env();
+  const realPut = e.ARCHIVES.put;
+  e.ARCHIVES.put = async (k, v, o) => {
+    if (o && o.metadata && "rev" in o.metadata) {
+      const { rev, ...rest } = o.metadata;
+      return realPut(k, v, { ...o, metadata: rest });
+    }
+    return realPut(k, v, o);
+  };
+  const up = await call(e, "/upload?name=legacy.zip", { method: "POST", headers: auth, body: writeArchive({ "a.txt": strToU8("old\ncontent\n") }, "zip") });
+  const { id } = await up.json();
+  const rpc = (name, args) => call(e, "/mcp", { method: "POST", headers: auth, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name, arguments: args } }) }).then((r) => r.json());
+  const r = await rpc("edit_file", { id, path: "a.txt", edits: [{ find: "old", replace: "new" }] });
+  assert.match(r.result.content[0].text, /Edited a\.txt/);
+  assert.equal((await rpc("read_file", { id, path: "a.txt" })).result.content[0].text, "new\ncontent\n");
 });

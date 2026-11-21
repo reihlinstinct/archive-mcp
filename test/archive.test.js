@@ -29,7 +29,7 @@ test("tools: list, read, search, create with base", async () => {
 test("tool errors are reported not thrown", async () => { assert.equal((await callTool("read_file", { id: "zzz", path: "a" }, mem())).isError, true); });
 test("rpc: initialize, list, notification, unknown", async () => {
   const s = mem();
-  assert.equal((await handleRpc({ jsonrpc: "2.0", id: 1, method: "tools/list" }, s)).result.tools.length, 9);
+  assert.equal((await handleRpc({ jsonrpc: "2.0", id: 1, method: "tools/list" }, s)).result.tools.length, 10);
   assert.equal(await handleRpc({ jsonrpc: "2.0", method: "notifications/initialized" }, s), null);
   assert.equal((await handleRpc({ jsonrpc: "2.0", id: 2, method: "nope" }, s)).error.code, -32601);
 });
