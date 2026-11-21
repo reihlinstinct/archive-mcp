@@ -19,6 +19,10 @@ export async function decrypt(secret, blob) {
   return new Uint8Array(await crypto.subtle.decrypt({ name: "AES-GCM", iv: u.subarray(0, 12) }, await key(secret, ["encrypt", "decrypt"], "data"), u.subarray(12)));
 }
 const hex = (b) => [...new Uint8Array(b)].map((x) => x.toString(16).padStart(2, "0")).join("");
+// Content revision for optimistic concurrency: SHA-256 of the plaintext bytes.
+export async function digestHex(data) {
+  return hex(await crypto.subtle.digest("SHA-256", data));
+}
 export async function sign(secret, msg) {
   return hex(await crypto.subtle.sign("HMAC", await key(secret, ["sign", "verify"], "link"), enc.encode(msg)));
 }
